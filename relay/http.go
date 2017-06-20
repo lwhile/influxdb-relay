@@ -10,6 +10,8 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,27 +19,28 @@ import (
 	"time"
 
 	"github.com/influxdata/influxdb/models"
+	"net/http/httptest"
 )
 
 // HTTP is a relay for HTTP influxdb writes
 type HTTP struct {
-	addr     string
-	name     string
-	schema   string
+	addr   string
+	name   string
+	schema string
 
-	cert     string
-	rp       string
+	cert string
+	rp   string
 
-	closing  int64
-	l        net.Listener
+	closing int64
+	l       net.Listener
 
 	backends []*httpBackend
 }
 
 const (
-	DefaultHTTPTimeout = 10 * time.Second
+	DefaultHTTPTimeout      = 10 * time.Second
 	DefaultMaxDelayInterval = 10 * time.Second
-	DefaultBatchSizeKB = 512
+	DefaultBatchSizeKB      = 512
 
 	KB = 1024
 	MB = 1024 * KB
@@ -64,6 +67,10 @@ func NewHTTP(cfg HTTPConfig) (Relay, error) {
 		}
 
 		h.backends = append(h.backends, backend)
+	}
+
+	for _, b := range h.backends {
+		newHealthChecker(b).startHealthChecker()
 	}
 
 	return h, nil
@@ -119,6 +126,37 @@ func (h *HTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if r.URL.Path == "/ok.htm" || r.URL.Path == "/ok" {
+		w.Write([]byte("ok"))
+		return
+	}
+
+	if r.URL.Path == "/health" {
+		for _, b := range h.backends {
+			w.Write([]byte(fmt.Sprintf("%s is %s\n", b.name, ifelse(b.alive, "up", "down"))))
+		}
+		return
+	}
+
+	queryParams := r.URL.Query()
+	// fail early if we're missing the database
+	db := queryParams.Get("db")
+
+	if r.URL.Path == "/query" {
+		if db == "" {
+			jsonError(w, http.StatusBadRequest, "missing parameter: db")
+			return
+		}
+		for _, b := range h.backends {
+			if b.acceptDb(db) && b.alive {
+				b.reverseProxy.ServeHTTP(w, r)
+				return
+			}
+		}
+		jsonError(w, 502, "bad gateway")
+		return
+	}
+
 	if r.URL.Path != "/write" {
 		jsonError(w, http.StatusNotFound, "invalid write endpoint")
 		return
@@ -134,10 +172,6 @@ func (h *HTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	queryParams := r.URL.Query()
-
-	// fail early if we're missing the database
-	db := queryParams.Get("db")
 	if db == "" {
 		jsonError(w, http.StatusBadRequest, "missing parameter: db")
 		return
@@ -215,7 +249,7 @@ func (h *HTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				if err != nil {
 					log.Printf("Problem posting to relay %q backend %q: %v", h.Name(), b.name, err)
 				} else {
-					if resp.StatusCode / 100 == 5 {
+					if resp.StatusCode/100 == 5 {
 						log.Printf("5xx response for relay %q backend %q: %v", h.Name(), b.name, resp.StatusCode)
 					}
 					responses <- resp
@@ -352,8 +386,10 @@ func (b *simplePoster) post(buf []byte, query string, auth string) (*responseDat
 
 type httpBackend struct {
 	poster
-	name      string
-	databases map[string]bool
+	name         string
+	databases    map[string]bool
+	reverseProxy *httputil.ReverseProxy
+	alive        bool
 }
 
 func newHTTPBackend(cfg *HTTPOutputConfig) (*httpBackend, error) {
@@ -395,13 +431,21 @@ func newHTTPBackend(cfg *HTTPOutputConfig) (*httpBackend, error) {
 			batch = cfg.MaxBatchKB * KB
 		}
 
-		p = newRetryBuffer(cfg.BufferSizeMB * MB, batch, max, p)
+		p = newRetryBuffer(cfg.BufferSizeMB*MB, batch, max, p)
 	}
 
+	u, error := url.Parse(cfg.Location)
+	if error != nil {
+		return nil, error
+	}
+	u.Path = ""
+
 	return &httpBackend{
-		poster: p,
-		name:   cfg.Name,
-		databases: databases,
+		poster:       p,
+		name:         cfg.Name,
+		databases:    databases,
+		reverseProxy: httputil.NewSingleHostReverseProxy(u),
+		alive:        true,
 	}, nil
 }
 
@@ -425,4 +469,58 @@ func getBuf() *bytes.Buffer {
 func putBuf(b *bytes.Buffer) {
 	b.Reset()
 	bufPool.Put(b)
+}
+
+type healthChecker struct {
+	backend      *httpBackend
+	fails        int
+	interval     int
+	failsTimeout int
+}
+
+func newHealthChecker(backend *httpBackend) *healthChecker {
+	return &healthChecker{
+		backend:      backend,
+		fails:        1,
+		interval:     5,
+		failsTimeout: 10,
+	}
+}
+
+func (c *healthChecker) startHealthChecker() {
+	fails := 0
+	go func() {
+		for true {
+			req := httptest.NewRequest("GET", "/ping", nil)
+			w := httptest.NewRecorder()
+			c.backend.reverseProxy.ServeHTTP(w, req)
+			resp := w.Result()
+			if resp.StatusCode/100 != 2 {
+				fails += 1
+			}
+			if fails >= c.fails {
+				if c.backend.alive {
+					log.Printf("backend %s is down", c.backend.name)
+				}
+				c.backend.alive = false
+				time.Sleep(time.Duration(c.failsTimeout) * time.Second)
+				fails = c.fails - 1
+			} else {
+				fails = 0
+				if !c.backend.alive {
+					log.Printf("backend %s is up", c.backend.name)
+				}
+				c.backend.alive = true
+				time.Sleep(time.Duration(c.interval) * time.Second)
+			}
+		}
+	}()
+}
+
+func ifelse(c bool, t string, f string) string {
+	if c {
+		return t
+	} else {
+		return f
+	}
 }
