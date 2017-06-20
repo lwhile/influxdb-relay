@@ -32,6 +32,8 @@ type HTTPOutputConfig struct {
 	// Name of the backend server
 	Name string `toml:"name"`
 
+	Databases []string `toml:"databases"`
+
 	// Location should be set to the URL of the backend server's write endpoint
 	Location string `toml:"location"`
 

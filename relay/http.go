@@ -21,23 +21,23 @@ import (
 
 // HTTP is a relay for HTTP influxdb writes
 type HTTP struct {
-	addr   string
-	name   string
-	schema string
+	addr     string
+	name     string
+	schema   string
 
-	cert string
-	rp   string
+	cert     string
+	rp       string
 
-	closing int64
-	l       net.Listener
+	closing  int64
+	l        net.Listener
 
 	backends []*httpBackend
 }
 
 const (
-	DefaultHTTPTimeout      = 10 * time.Second
+	DefaultHTTPTimeout = 10 * time.Second
 	DefaultMaxDelayInterval = 10 * time.Second
-	DefaultBatchSizeKB      = 512
+	DefaultBatchSizeKB = 512
 
 	KB = 1024
 	MB = 1024 * KB
@@ -114,9 +114,9 @@ func (h *HTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
 	if r.URL.Path == "/ping" && (r.Method == "GET" || r.Method == "HEAD") {
-			w.Header().Add("X-InfluxDB-Version", "relay")
-			w.WriteHeader(http.StatusNoContent)
-			return
+		w.Header().Add("X-InfluxDB-Version", "relay")
+		w.WriteHeader(http.StatusNoContent)
+		return
 	}
 
 	if r.URL.Path != "/write" {
@@ -137,7 +137,8 @@ func (h *HTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	queryParams := r.URL.Query()
 
 	// fail early if we're missing the database
-	if queryParams.Get("db") == "" {
+	db := queryParams.Get("db")
+	if db == "" {
 		jsonError(w, http.StatusBadRequest, "missing parameter: db")
 		return
 	}
@@ -209,14 +210,16 @@ func (h *HTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		b := b
 		go func() {
 			defer wg.Done()
-			resp, err := b.post(outBytes, query, authHeader)
-			if err != nil {
-				log.Printf("Problem posting to relay %q backend %q: %v", h.Name(), b.name, err)
-			} else {
-				if resp.StatusCode/100 == 5 {
-					log.Printf("5xx response for relay %q backend %q: %v", h.Name(), b.name, resp.StatusCode)
+			if b.acceptDb(db) {
+				resp, err := b.post(outBytes, query, authHeader)
+				if err != nil {
+					log.Printf("Problem posting to relay %q backend %q: %v", h.Name(), b.name, err)
+				} else {
+					if resp.StatusCode / 100 == 5 {
+						log.Printf("5xx response for relay %q backend %q: %v", h.Name(), b.name, resp.StatusCode)
+					}
+					responses <- resp
 				}
-				responses <- resp
 			}
 		}()
 	}
@@ -349,12 +352,19 @@ func (b *simplePoster) post(buf []byte, query string, auth string) (*responseDat
 
 type httpBackend struct {
 	poster
-	name string
+	name      string
+	databases map[string]bool
 }
 
 func newHTTPBackend(cfg *HTTPOutputConfig) (*httpBackend, error) {
 	if cfg.Name == "" {
 		cfg.Name = cfg.Location
+	}
+
+	databases := map[string]bool{}
+
+	for _, db := range cfg.Databases {
+		databases[db] = true
 	}
 
 	timeout := DefaultHTTPTimeout
@@ -385,18 +395,25 @@ func newHTTPBackend(cfg *HTTPOutputConfig) (*httpBackend, error) {
 			batch = cfg.MaxBatchKB * KB
 		}
 
-		p = newRetryBuffer(cfg.BufferSizeMB*MB, batch, max, p)
+		p = newRetryBuffer(cfg.BufferSizeMB * MB, batch, max, p)
 	}
 
 	return &httpBackend{
 		poster: p,
 		name:   cfg.Name,
+		databases: databases,
 	}, nil
+}
+
+func (h *httpBackend) acceptDb(db string) bool {
+	return h.databases[db]
 }
 
 var ErrBufferFull = errors.New("retry buffer full")
 
-var bufPool = sync.Pool{New: func() interface{} { return new(bytes.Buffer) }}
+var bufPool = sync.Pool{New: func() interface{} {
+	return new(bytes.Buffer)
+}}
 
 func getBuf() *bytes.Buffer {
 	if bb, ok := bufPool.Get().(*bytes.Buffer); ok {
