@@ -144,7 +144,7 @@ func (h *HTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if r.URL.Path == "/query" {
 		if db == "" {
-			jsonError(w, http.StatusBadRequest, "missing parameter: db")
+			jsonError(w, http.StatusBadRequest, "missing parameter: \"db\"")
 			return
 		}
 		for _, b := range h.backends {
@@ -173,7 +173,7 @@ func (h *HTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if db == "" {
-		jsonError(w, http.StatusBadRequest, "missing parameter: db")
+		jsonError(w, http.StatusBadRequest, "missing parameter: \"db\"")
 		return
 	}
 
@@ -474,16 +474,16 @@ func putBuf(b *bytes.Buffer) {
 type healthChecker struct {
 	backend      *httpBackend
 	fails        int
-	interval     int
-	failsTimeout int
+	interval     time.Duration
+	failsTimeout time.Duration
 }
 
 func newHealthChecker(backend *httpBackend) *healthChecker {
 	return &healthChecker{
 		backend:      backend,
 		fails:        1,
-		interval:     5,
-		failsTimeout: 10,
+		interval:     5 * time.Second,
+		failsTimeout: 10 * time.Second,
 	}
 }
 
@@ -503,7 +503,7 @@ func (c *healthChecker) startHealthChecker() {
 					log.Printf("backend %s is down", c.backend.name)
 				}
 				c.backend.alive = false
-				time.Sleep(time.Duration(c.failsTimeout) * time.Second)
+				time.Sleep(c.failsTimeout)
 				fails = c.fails - 1
 			} else {
 				fails = 0
@@ -511,7 +511,7 @@ func (c *healthChecker) startHealthChecker() {
 					log.Printf("backend %s is up", c.backend.name)
 				}
 				c.backend.alive = true
-				time.Sleep(time.Duration(c.interval) * time.Second)
+				time.Sleep(c.interval)
 			}
 		}
 	}()
