@@ -213,14 +213,6 @@ func (h *HTTP) serveQuery(w http.ResponseWriter, r *http.Request) {
 			rw.WriteResponse(resp)
 			return
 		}
-		_, ok = st.(*influxql.SelectStatement)
-		if !ok {
-			resp.Results = append(resp.Results, &influxql.Result{
-				Err: errors.New("not supported"),
-			})
-			rw.WriteResponse(resp)
-			return
-		}
 	}
 
 	if db == "" {
@@ -237,8 +229,17 @@ func (h *HTTP) serveQuery(w http.ResponseWriter, r *http.Request) {
 	for _, st := range sts {
 		_, ok := st.(*influxql.SelectStatement)
 		if !ok {
-			h.httpError(rw, "contains unsupported statement", http.StatusBadRequest)
-			return
+			switch st.(type) {
+			case *influxql.ShowMeasurementsStatement:
+				continue
+			case *influxql.ShowTagValuesStatement:
+				continue
+			case *influxql.ShowTagKeysStatement:
+				continue
+			default:
+				h.httpError(rw, "contains unsupported statement", http.StatusBadRequest)
+				return
+			}
 		}
 	}
 
