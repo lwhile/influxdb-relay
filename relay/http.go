@@ -274,10 +274,6 @@ func (h *HTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	queryParams := r.URL.Query()
-	// fail early if we're missing the database
-	db := queryParams.Get("db")
-
 	if r.URL.Path == "/query" {
 		h.serveQuery(w, r)
 		return
@@ -298,6 +294,9 @@ func (h *HTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	queryParams := r.URL.Query()
+	// fail early if we're missing the database
+	db := queryParams.Get("db")
 	if db == "" {
 		jsonError(w, http.StatusBadRequest, "missing parameter: \"db\"")
 		return
