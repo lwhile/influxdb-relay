@@ -1,9 +1,7 @@
-
-
 [[http]]
 name = "example-http"
 bind-addr = "127.0.0.1:9096"
 output = [
-    { name="local1", location = "http://127.0.0.1:8086/write", buffer-size-mb = 100, max-batch-kb = 50, max-delay-interval = "5s" },
-    { name="local2", location = "http://127.0.0.1:7086/write", buffer-size-mb = 100, max-batch-kb = 50, max-delay-interval = "5s" },
+    { name="local1", databases = ["test", "graylog"], location = "http://127.0.0.1:8086/write", buffer-size-mb = 100, max-batch-kb = 50, max-delay-interval = "5s" },
+    { name="local2", databases = ["test", "graylog"], location = "http://127.0.0.1:7086/write", buffer-size-mb = 100, max-batch-kb = 50, max-delay-interval = "5s" },
 ]
