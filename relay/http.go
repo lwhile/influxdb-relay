@@ -236,6 +236,8 @@ func (h *HTTP) serveQuery(w http.ResponseWriter, r *http.Request) {
 				continue
 			case *influxql.ShowTagKeysStatement:
 				continue
+			case *influxql.ShowSeriesStatement:
+				continue
 			default:
 				h.httpError(rw, "contains unsupported statement", http.StatusBadRequest)
 				return
