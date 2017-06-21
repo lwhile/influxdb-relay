@@ -6,6 +6,8 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"github.com/influxdata/influxdb/services/httpd"
+	"io"
 	"io/ioutil"
 	"log"
 	"net"
@@ -18,6 +20,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"encoding/json"
+	"github.com/influxdata/influxdb/influxql"
 	"github.com/influxdata/influxdb/models"
 	"net/http/httptest"
 )
@@ -117,6 +121,138 @@ func (h *HTTP) Stop() error {
 	return h.l.Close()
 }
 
+func drainBody(body io.ReadCloser) (bf *bytes.Reader, err error) {
+	if body == nil {
+		return bytes.NewReader(make([]byte, 1)), nil
+	}
+	var buf = new(bytes.Buffer)
+	if _, err = buf.ReadFrom(body); err != nil {
+		return bytes.NewReader(buf.Bytes()), err
+	}
+	if err = body.Close(); err != nil {
+		return bytes.NewReader(buf.Bytes()), err
+	}
+	return bytes.NewReader(buf.Bytes()), nil
+}
+
+func (h *HTTP) serveQuery(w http.ResponseWriter, r *http.Request) {
+	rw, ok := w.(httpd.ResponseWriter)
+	if !ok {
+		rw = httpd.NewResponseWriter(w, r)
+	}
+	bodyReader, err := drainBody(r.Body)
+	if err != nil {
+		h.httpError(rw, err.Error(), http.StatusBadGateway)
+		return
+	}
+	r.Body = ioutil.NopCloser(bodyReader)
+
+	var qr io.Reader
+	if qp := strings.TrimSpace(r.FormValue("q")); qp != "" {
+		qr = strings.NewReader(qp)
+	} else if r.MultipartForm != nil && r.MultipartForm.File != nil {
+		// If we have a multipart/form-data, try to retrieve a file from 'q'.
+		if fhs := r.MultipartForm.File["q"]; len(fhs) > 0 {
+			f, err := fhs[0].Open()
+			if err != nil {
+				h.httpError(rw, err.Error(), http.StatusBadRequest)
+				return
+			}
+			defer f.Close()
+			qr = f
+		}
+	}
+
+	if qr == nil {
+		h.httpError(rw, `missing required parameter "q"`, http.StatusBadRequest)
+		return
+	}
+
+	p := influxql.NewParser(qr)
+	db := r.FormValue("db")
+
+	// Parse query from query string.
+	query, err := p.ParseQuery()
+	if err != nil {
+		h.httpError(rw, "error parsing query: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	sts := query.Statements
+	resp := httpd.Response{Results: make([]*influxql.Result, 0)}
+
+	if len(sts) == 0 {
+		rw.WriteResponse(resp)
+		return
+	}
+
+	if len(sts) == 1 {
+		st := sts[0]
+		switch st.(type) {
+		case *influxql.ShowDatabasesStatement:
+			databases := map[string]bool{}
+			for _, b := range h.backends {
+				for k, v := range b.databases {
+					databases[k] = v
+				}
+			}
+			values := [][]interface{}{}
+			for k, _ := range databases {
+				values = append(values, []interface{}{k})
+			}
+
+			rows := models.Rows{}
+			resp.Results = append(resp.Results, &influxql.Result{
+				StatementID: 0,
+				Series: append(rows, &models.Row{
+					Name:    "databases",
+					Columns: []string{"name"},
+					Values:  values,
+				}),
+			})
+			rw.WriteResponse(resp)
+			return
+		}
+		_, ok = st.(*influxql.SelectStatement)
+		if !ok {
+			resp.Results = append(resp.Results, &influxql.Result{
+				Err: errors.New("not supported"),
+			})
+			rw.WriteResponse(resp)
+			return
+		}
+	}
+
+	if db == "" {
+		for i, _ := range sts {
+			resp.Results = append(resp.Results, &influxql.Result{
+				StatementID: i,
+				Err:         errors.New("database name required"),
+			})
+		}
+		rw.WriteResponse(resp)
+		return
+	}
+
+	for _, st := range sts {
+		_, ok := st.(*influxql.SelectStatement)
+		if !ok {
+			h.httpError(rw, "contains unsupported statement", http.StatusBadRequest)
+			return
+		}
+	}
+
+	for _, b := range h.backends {
+		if b.acceptDb(db) && b.alive {
+			bodyReader.Seek(0, 0)
+			b.reverseProxy.ServeHTTP(w, r)
+			return
+		}
+	}
+
+	h.httpError(rw, "no available backend", http.StatusBadGateway)
+}
+
 func (h *HTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
@@ -143,17 +279,7 @@ func (h *HTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	db := queryParams.Get("db")
 
 	if r.URL.Path == "/query" {
-		if db == "" {
-			jsonError(w, http.StatusBadRequest, "missing parameter: \"db\"")
-			return
-		}
-		for _, b := range h.backends {
-			if b.acceptDb(db) && b.alive {
-				b.reverseProxy.ServeHTTP(w, r)
-				return
-			}
-		}
-		jsonError(w, 502, "bad gateway")
+		h.serveQuery(w, r)
 		return
 	}
 
@@ -320,6 +446,33 @@ func jsonError(w http.ResponseWriter, code int, message string) {
 	w.Header().Set("Content-Length", fmt.Sprint(len(data)))
 	w.WriteHeader(code)
 	w.Write([]byte(data))
+}
+
+// httpError writes an error to the client in a standard format.
+func (h *HTTP) httpError(w http.ResponseWriter, error string, code int) {
+	if code == http.StatusUnauthorized {
+		// If an unauthorized header will be sent back, add a WWW-Authenticate header
+		// as an authorization challenge.
+		w.Header().Set("WWW-Authenticate", fmt.Sprintf("Basic realm=\"%s\"", "influxdb"))
+	}
+
+	response := httpd.Response{Err: errors.New(error)}
+	if rw, ok := w.(httpd.ResponseWriter); ok {
+		h.writeHeader(w, code)
+		rw.WriteResponse(response)
+		return
+	}
+
+	// Default implementation if the response writer hasn't been replaced
+	// with our special response writer type.
+	w.Header().Add("Content-Type", "application/json")
+	h.writeHeader(w, code)
+	b, _ := json.Marshal(response)
+	w.Write(b)
+}
+
+func (h *HTTP) writeHeader(w http.ResponseWriter, code int) {
+	w.WriteHeader(code)
 }
 
 type poster interface {
