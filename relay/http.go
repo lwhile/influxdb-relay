@@ -645,7 +645,7 @@ func newHealthChecker(backend *httpBackend) *healthChecker {
 func (c *healthChecker) startHealthChecker() {
 	fails := 0
 	go func() {
-		for true {
+		for {
 			req := httptest.NewRequest("GET", "/ping", nil)
 			w := httptest.NewRecorder()
 			c.backend.reverseProxy.ServeHTTP(w, req)
