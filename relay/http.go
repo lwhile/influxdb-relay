@@ -123,11 +123,13 @@ func (h *HTTP) Stop() error {
 	return h.l.Close()
 }
 
+//
 func drainBody(body io.ReadCloser) (bf *bytes.Reader, err error) {
 	if body == nil {
 		return bytes.NewReader(make([]byte, 1)), nil
 	}
 	var buf = new(bytes.Buffer)
+
 	if _, err = buf.ReadFrom(body); err != nil {
 		return bytes.NewReader(buf.Bytes()), err
 	}
@@ -142,11 +144,15 @@ func (h *HTTP) serveQuery(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		rw = httpd.NewResponseWriter(w, r)
 	}
+
+	// tranfer r.body(io.ReadCloser) to *bytes.Reader
 	bodyReader, err := drainBody(r.Body)
 	if err != nil {
 		h.httpError(rw, err.Error(), http.StatusBadGateway)
 		return
 	}
+
+	// set Reader to ReadClose
 	r.Body = ioutil.NopCloser(bodyReader)
 
 	var qr io.Reader
@@ -191,6 +197,7 @@ func (h *HTTP) serveQuery(w http.ResponseWriter, r *http.Request) {
 	if len(sts) == 1 {
 		st := sts[0]
 		switch st.(type) {
+		// 对 show database 语句单独处理
 		case *influxql.ShowDatabasesStatement:
 			databases := map[string]bool{}
 			for _, b := range h.backends {
@@ -228,6 +235,7 @@ func (h *HTTP) serveQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// relay提前检查语句是否合法
 	for _, st := range sts {
 		_, ok := st.(*influxql.SelectStatement)
 		if !ok {
@@ -247,6 +255,9 @@ func (h *HTTP) serveQuery(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 默认从所有的 backend 读
+	// 有一个 backend 成功响应就返回
+	// TODO: 添加更多的后端选择策略
 	for _, b := range h.backends {
 		if b.acceptDb(db) && b.alive {
 			bodyReader.Seek(0, 0)
