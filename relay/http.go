@@ -139,6 +139,8 @@ func drainBody(body io.ReadCloser) (bf *bytes.Reader, err error) {
 	return bytes.NewReader(buf.Bytes()), nil
 }
 
+// fork from https://github.com/shanexu/influxdb-relay/blob/master/relay/http.go
+// and the author @shanexu reserve the right of final explanations
 func (h *HTTP) serveQuery(w http.ResponseWriter, r *http.Request) {
 	rw, ok := w.(httpd.ResponseWriter)
 	if !ok {
