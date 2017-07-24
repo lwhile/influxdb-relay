@@ -7,14 +7,15 @@ import (
 	"os"
 	"os/signal"
 
-	"github.com/lwhile/influxdb-relay/relay"
+	"git.gzsunrun.cn/sunruniaas/influxdb-relay/relay"
+	"github.com/prometheus/node_exporter/util"
 )
 
 var (
 	configFile = flag.String("config", "", "Configuration file to use")
 )
 
-func main() {
+func startRelay() {
 	flag.Parse()
 
 	if *configFile == "" {
@@ -43,4 +44,8 @@ func main() {
 
 	log.Println("starting relays...")
 	r.Run()
+}
+
+func main() {
+	util.BackGroundService("influxdb-relay", "influxdb high available relay", nil, startRelay)
 }
